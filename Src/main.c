@@ -10,7 +10,7 @@
 #include "stm32l4xx_ll_pwr.h"
 #include "stm32l4xx_ll_rtc.h"
 #include <stdio.h>
-
+#include "clock.h"
 #include "gpio.h"
 
 /* ck_apre=LSIFreq/(ASYNC prediv + 1) with LSIFreq=32 kHz RC */
@@ -38,7 +38,7 @@ void Show_RTC_Calendar(void);
 
 int periodLED = 0; //Période en ms
 int counter = 0;
-int expe = 2;
+int expe = 0;
 int mode = 0;
 
 /* Buffers used for displaying Time and Date */
@@ -47,11 +47,28 @@ uint8_t aShowDate[50] = { 0 };
 
 int main(void) {
 
-	/* Configure the system clock */
-	SystemClock_Config24MHz();
+	LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
+	LL_PWR_EnableBkUpAccess();
 
 	/* Configuration RTC clock */
-	Configure_RTC_Clock();
+	Configure_RTC_Clock(); // LSE
+
+	if (LL_RTC_BAK_GetRegister(RTC,
+	LL_RTC_BKP_DR1) != RTC_BKP_DATE_TIME_UPDTATED) {
+		/*##-Configure the RTC peripheral #######################################*/
+		Configure_RTC();
+		/* Configure RTC Calendar */
+		/*Configure_RTC_Calendar();*/
+	}
+
+	expe = LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR0);
+	expe++;
+
+	/* Configure the system clock */
+	SystemClockConfig(expe);
+
+	/* Calibration */
+	InitCalibration_Sleep(expe);
 
 	// config GPIO
 	GPIO_init();
@@ -61,24 +78,19 @@ int main(void) {
 
 	SysTick_Config(SystemCoreClock / 100);
 
-	if (LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR1) != RTC_BKP_DATE_TIME_UPDTATED) {
-		/*##-Configure the RTC peripheral #######################################*/
-		Configure_RTC();
-
-		/* Configure RTC Calendar */
-		Configure_RTC_Calendar();
-	}
-
 	LED_GREEN(0);
 
 	while (1) {
 
-		Show_RTC_Calendar();
+		//Show_RTC_Calendar();
 
 		if (BLUE_BUTTON() && mode == 0) {
 			mode = 1;
 		}
 		if (mode) {
+
+			LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR0, expe);
+
 			if (expe == 1) {
 				LL_LPM_EnableSleep();
 				__WFI();
@@ -100,38 +112,6 @@ int main(void) {
 		}
 	}
 
-
-}
-
-/* EXPE1 - MSI Clock Congig 4MHZ + PLL 80MHz*/
-void SystemClock_Config4MHz_PLL80MHz(void) {
-
-}
-
-/* EXPE2 - MSI Clock Config 24MHz */
-void SystemClock_Config24MHz(void) {
-
-	/* MSI configuration and activation */
-
-	LL_FLASH_SetLatency(LL_FLASH_LATENCY_1);
-	LL_RCC_MSI_EnableRangeSelection();
-
-	if (LL_RCC_MSI_IsEnabledRangeSelect()) {
-		LL_RCC_MSI_SetRange(LL_RCC_MSIRANGE_9);
-	}
-
-	LL_RCC_MSI_Enable();
-	while (LL_RCC_MSI_IsReady() != 1);
-
-	/* Sysclk activation on the main PLL */
-	LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
-
-	/* Set APB1 & APB2 prescaler*/
-	LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
-	LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_1);
-
-	/* Update the global variable called SystemCoreClock */
-	SystemCoreClockUpdate();
 }
 
 void LL_Init10msTick(uint32_t HCLKFrequency) {
@@ -181,20 +161,19 @@ void SysTick_Handler() {
 
 void Configure_RTC_Clock(void) {
 
-	LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
-	LL_PWR_EnableBkUpAccess();
-
 	if (LL_RCC_LSE_IsReady() != 1) {
 
 		/* Enable LSE */
 		LL_RCC_LSE_Enable();
-		while (LL_RCC_LSE_IsReady() != 1);
+		while (LL_RCC_LSE_IsReady() != 1)
+			;
 
 		if (LL_RCC_GetRTCClockSource() != LL_RCC_RTC_CLKSOURCE_LSE) {
 			LL_RCC_ForceBackupDomainReset();
 			LL_RCC_ReleaseBackupDomainReset();
 			LL_RCC_SetRTCClockSource(LL_RCC_RTC_CLKSOURCE_LSE);
 		}
+
 	}
 }
 
@@ -282,31 +261,13 @@ void Configure_RTC_Calendar(void) {
 	/* Clear RSF flag */
 	LL_RTC_ClearFlag_RS(RTC);
 
-	while (LL_RTC_IsActiveFlag_RS(RTC) != 1);
+	while (LL_RTC_IsActiveFlag_RS(RTC) != 1)
+		;
 
 	/*##-6- Enable RTC registers write protection #############################*/
 	LL_RTC_EnableWriteProtection(RTC);
 
 	/*##-8- Writes a data in a RTC Backup data Register1 #######################*/
 	LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR1, RTC_BKP_DATE_TIME_UPDTATED);
-}
-
-/**
- * @brief  Display the current time and date.
- * @param  None
- * @retval None
- */
-void Show_RTC_Calendar(void) {
-	/* Note: need to convert in decimal value in using __LL_RTC_CONVERT_BCD2BIN helper macro */
-	/* Display time Format : hh:mm:ss */
-	sprintf((char*) aShowTime, "%.2d:%.2d:%.2d",
-			__LL_RTC_CONVERT_BCD2BIN(LL_RTC_TIME_GetHour(RTC)),
-			__LL_RTC_CONVERT_BCD2BIN(LL_RTC_TIME_GetMinute(RTC)),
-			__LL_RTC_CONVERT_BCD2BIN(LL_RTC_TIME_GetSecond(RTC)));
-	/* Display date Format : mm-dd-yy */
-	sprintf((char*) aShowDate, "%.2d-%.2d-%.2d",
-			__LL_RTC_CONVERT_BCD2BIN(LL_RTC_DATE_GetMonth(RTC)),
-			__LL_RTC_CONVERT_BCD2BIN(LL_RTC_DATE_GetDay(RTC)),
-			2000 + __LL_RTC_CONVERT_BCD2BIN(LL_RTC_DATE_GetYear(RTC)));
 }
 
