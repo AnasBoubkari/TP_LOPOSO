@@ -24,94 +24,59 @@
 /* Define used to indicate date/time updated */
 #define RTC_BKP_DATE_TIME_UPDTATED ((uint32_t)0x32F2)
 
-/* Clock configurations */
-void SystemClock_Config24MHz(void);
-void SystemClock_Config4MHz_PLL80MHz(void);
-
 /* Systick Initialization */
 void LL_Init10msTick(uint32_t HCLKFrequency);
 
 void Configure_RTC_Clock(void);
 void Configure_RTC(void);
 void Configure_RTC_Calendar(void);
-void Show_RTC_Calendar(void);
 
-int periodLED = 0; //Période en ms
 int counter = 0;
+int counter_pin = 0;
 int expe = 0;
-int mode = 0;
-
-/* Buffers used for displaying Time and Date */
-uint8_t aShowTime[50] = { 0 };
-uint8_t aShowDate[50] = { 0 };
+int blue_mode = 0;
+int isReady = 0;
 
 int main(void) {
-
-	LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
-	LL_PWR_EnableBkUpAccess();
-
-	/* Configuration RTC clock */
-	Configure_RTC_Clock(); // LSE
-
-	if (LL_RTC_BAK_GetRegister(RTC,
-	LL_RTC_BKP_DR1) != RTC_BKP_DATE_TIME_UPDTATED) {
-		/*##-Configure the RTC peripheral #######################################*/
-		Configure_RTC();
-		/* Configure RTC Calendar */
-		/*Configure_RTC_Calendar();*/
-	}
-
-	expe = LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR0);
-	expe++;
-
-	/* Configure the system clock */
-	SystemClockConfig(expe);
-
-	/* Calibration */
-	InitCalibration_Sleep(expe);
 
 	// config GPIO
 	GPIO_init();
 
-	// init timer pour utiliser la fonction LL_mDelay() de stm32l4xx_ll_utils.c
-	//LL_Init10msTick( SystemCoreClock );
+	// 1. Initialiser RTC
+	Configure_RTC_Clock();
+
+	// 2. Gestion de la variable "expe"
+	expe = LL_RTC_BAK_GetRegister(RTC, LL_RTC_BKP_DR0);
+	expe++;
+	expe = (expe > 8 ? 1 : expe);
+	LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR0, expe);
+
+	// 3. Configurer horloge
+	SystemClockConfig(expe);
+
+	// 4. Activer calibration MSI vs LSE
+	if (expe == 8) {
+		LL_RCC_MSI_EnablePLLMode();
+		LL_LPM_EnableSleep();
+		RTC_wakeup_init_from_standby_or_shutdown(20);
+	}
+
+	if ((5 <= expe) || (expe >= 7)) {
+		LL_RCC_MSI_EnablePLLMode();
+		LL_LPM_EnableSleep();
+		RTC_wakeup_init_from_stop(20);
+	}
+
+	// 5. Configurer timer SysTick
+	LL_Init10msTick(SystemCoreClock);
 
 	SysTick_Config(SystemCoreClock / 100);
 
 	LED_GREEN(0);
 
-	while (1) {
-
-		//Show_RTC_Calendar();
-
-		if (BLUE_BUTTON() && mode == 0) {
-			mode = 1;
-		}
-		if (mode) {
-
-			LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR0, expe);
-
-			if (expe == 1) {
-				LL_LPM_EnableSleep();
-				__WFI();
-			} else if (expe == 2) {
-				LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
-				LL_PWR_EnableBkUpAccess();
-				if (LL_RCC_LSE_IsReady() == 0) {
-					LL_RCC_ForceBackupDomainReset();
-					LL_RCC_ReleaseBackupDomainReset();
-					LL_RCC_LSE_Enable();
-				}
-
-				//LL_RCC_ReleaseBackup
-				while (!LL_RCC_LSE_IsReady())
-					;
-
-				LL_RCC_MSI_EnablePLLMode();
-			}
-		}
+	while (1)
+	{
 	}
-
 }
 
 void LL_Init10msTick(uint32_t HCLKFrequency) {
@@ -122,51 +87,106 @@ void LL_Init10msTick(uint32_t HCLKFrequency) {
 
 void SysTick_Handler() {
 
-	switch (expe) {
-
-	case 1:
-
-		if (counter < 5 * expe) {
-			LED_GREEN(1);
-			counter++;
-		} else if (counter < 100) {
-			LED_GREEN(0);
-			if (counter == 99) {
-				counter = 0;
-			} else {
-				counter++;
-			}
-		}
-
-		break;
-
-	case 2:
-
-		if (counter == 0) {
-			counter++;
-			LL_GPIO_ResetOutputPin(GPIOC, LL_GPIO_PIN_10);
-
-		} else {
+	// LED
+	if (counter < 5 * expe) {
+		LED_GREEN(1);
+		counter++;
+	} else if (counter < 100) {
+		LED_GREEN(0);
+		if (counter == 99) {
 			counter = 0;
-			LL_GPIO_SetOutputPin(GPIOC, LL_GPIO_PIN_10);
+		} else {
+			counter++;
 		}
+	}
 
-		break;
+	// PIN_10
+	if (counter_pin == 0) {
+		counter_pin++;
+		LL_GPIO_ResetOutputPin(GPIOC, LL_GPIO_PIN_10);
 
-	default:
-		break;
+	} else {
+		counter_pin = 0;
+		LL_GPIO_SetOutputPin(GPIOC, LL_GPIO_PIN_10);
+	}
 
+
+	// BLUE_MODE
+	if (BLUE_BUTTON()) {
+		blue_mode = 1;
+	}
+
+	if (blue_mode) {
+		switch (expe) {
+		case 1:
+			LL_LPM_EnableSleep();
+			__WFI();
+			break;
+		case 2:
+			if (isReady == 0) {
+				isReady = 1;
+				LL_RCC_MSI_EnablePLLMode();
+			}
+			break;
+		case 3:
+			LL_LPM_EnableSleep();
+			__WFI();
+			break;
+		case 4:
+			if (isReady == 0) {
+				isReady = 1;
+				LL_RCC_MSI_EnablePLLMode();
+			}
+			break;
+		case 5:
+			if (isReady == 0) {
+				isReady = 1;
+				LL_PWR_SetPowerMode(LL_PWR_MODE_STOP0);
+				LL_LPM_EnableDeepSleep();
+				__WFI();
+			}
+			break;
+		case 6:
+			if (isReady == 0) {
+				isReady = 1;
+				LL_PWR_SetPowerMode(LL_PWR_MODE_STOP1);
+				LL_LPM_EnableDeepSleep();
+				__WFI();
+			}
+			break;
+		case 7:
+			if (isReady == 0) {
+				isReady = 1;
+				LL_PWR_SetPowerMode(LL_PWR_MODE_STOP2);
+				LL_LPM_EnableDeepSleep();
+				__WFI();
+			}
+			break;
+		case 8:
+			LL_PWR_SetPowerMode(LL_PWR_MODE_SHUTDOWN);
+			LL_LPM_EnableDeepSleep();
+			__WFI();
+			break;
+		default:
+			break;
+		}
 	}
 }
 
 void Configure_RTC_Clock(void) {
 
+	// Démarrage à chaud
+	LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
+	LL_PWR_EnableBkUpAccess();
+
+	// Démarrage à froid
 	if (LL_RCC_LSE_IsReady() != 1) {
 
 		/* Enable LSE */
 		LL_RCC_LSE_Enable();
 		while (LL_RCC_LSE_IsReady() != 1)
-			;
+		{
+		}
 
 		if (LL_RCC_GetRTCClockSource() != LL_RCC_RTC_CLKSOURCE_LSE) {
 			LL_RCC_ForceBackupDomainReset();
@@ -174,6 +194,7 @@ void Configure_RTC_Clock(void) {
 			LL_RCC_SetRTCClockSource(LL_RCC_RTC_CLKSOURCE_LSE);
 		}
 
+		Configure_RTC();
 	}
 }
 
@@ -225,49 +246,3 @@ void Configure_RTC(void) {
 	/*##-6- Enable RTC registers write protection #############################*/
 	LL_RTC_EnableWriteProtection(RTC);
 }
-
-/**
- * @brief  Configure the current time and date.
- * @param  None
- * @retval None
- */
-void Configure_RTC_Calendar(void) {
-	/*##-1- Disable RTC registers write protection ############################*/
-	LL_RTC_DisableWriteProtection(RTC);
-
-	/*##-2- Enter in initialization mode ######################################*/
-	LL_RTC_EnableInitMode(RTC);
-
-	while (LL_RTC_IsActiveFlag_INIT(RTC) != 1) {
-	}
-
-	/*##-3- Configure the Date ################################################*/
-	/* Note: __LL_RTC_CONVERT_BIN2BCD helper macro can be used if user wants to*/
-	/*       provide directly the decimal value:                               */
-	/*       LL_RTC_DATE_Config(RTC, LL_RTC_WEEKDAY_MONDAY,                    */
-	/*                          __LL_RTC_CONVERT_BIN2BCD(31), (...))           */
-	/* Set Date: Monday March 31th 2015 */
-	LL_RTC_DATE_Config(RTC, LL_RTC_WEEKDAY_MONDAY, 0x31, LL_RTC_MONTH_MARCH,
-			0x15);
-
-	/*##-4- Configure the Time ################################################*/
-	/* Set Time: 11:59:55 PM*/
-	LL_RTC_TIME_Config(RTC, LL_RTC_TIME_FORMAT_PM, 0x11, 0x59, 0x55);
-
-	/*##-5- Exit of initialization mode #######################################*/
-
-	LL_RTC_DisableInitMode(RTC);
-
-	/* Clear RSF flag */
-	LL_RTC_ClearFlag_RS(RTC);
-
-	while (LL_RTC_IsActiveFlag_RS(RTC) != 1)
-		;
-
-	/*##-6- Enable RTC registers write protection #############################*/
-	LL_RTC_EnableWriteProtection(RTC);
-
-	/*##-8- Writes a data in a RTC Backup data Register1 #######################*/
-	LL_RTC_BAK_SetRegister(RTC, LL_RTC_BKP_DR1, RTC_BKP_DATE_TIME_UPDTATED);
-}
-
